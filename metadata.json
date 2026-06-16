@@ -1,0 +1,6 @@
+{
+  "name": "VibeTheory",
+  "description": "Aus Gefühl wird Musikverständnis – Ein moderner, gemütlicher Musiktheorie-Trainer für Piano, Gitarre und Bass.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
