@@ -132,6 +132,56 @@ const getChordInterval = (chordName: string, noteName: string) => {
     bgClass: "bg-gray-950/20"
   };
 };
+
+const getChordTag = (chord: string, keySymbol: string): "Diatonic" | "Dominant" | "Borrowed" => {
+  const upperChord = chord;
+  const lowerKey = keySymbol.toLowerCase();
+
+  const isDominant = () => {
+    if (["E7", "A7", "B7", "G7", "D7"].includes(upperChord)) {
+      return true;
+    }
+    if (lowerKey.includes("a-m") || lowerKey.includes("am") || lowerKey.includes("a moll") || lowerKey.includes("a-moll")) {
+      return ["E", "E7", "G#dim", "G7"].includes(upperChord);
+    }
+    if (lowerKey.includes("e-m") || lowerKey.includes("em") || lowerKey.includes("e moll") || lowerKey.includes("e-moll")) {
+      return ["B", "B7", "D#dim", "D7"].includes(upperChord);
+    }
+    if (lowerKey.includes("d-m") || lowerKey.includes("dm") || lowerKey.includes("d moll") || lowerKey.includes("d-moll")) {
+      return ["A", "A7", "C#dim", "C7"].includes(upperChord);
+    }
+    if (lowerKey.includes("g-d") || lowerKey.includes("g dur") || lowerKey.includes("g-dur") || lowerKey.includes("g major")) {
+      return ["D", "D7", "F#dim", "B7"].includes(upperChord);
+    }
+    if (lowerKey.includes("c-d") || lowerKey.includes("c dur") || lowerKey.includes("c-dur") || lowerKey.includes("c major")) {
+      return ["G", "G7", "Bdim", "D7", "E7"].includes(upperChord);
+    }
+    return false;
+  };
+
+  if (isDominant()) {
+    return "Dominant";
+  }
+
+  let diatonicSet = new Set(["C", "Am", "F", "G", "Dm", "Em", "Am7", "Em7"]);
+  if (lowerKey.includes("a-m") || lowerKey.includes("am") || lowerKey.includes("a moll") || lowerKey.includes("a-moll")) {
+    diatonicSet = new Set(["Am", "C", "F", "G", "Dm", "Em", "E7", "Am7", "Em7"]);
+  } else if (lowerKey.includes("e-m") || lowerKey.includes("em") || lowerKey.includes("e moll") || lowerKey.includes("e-moll")) {
+    diatonicSet = new Set(["Em", "G", "C", "D", "Am", "Bm", "B7", "Em7", "Am7"]);
+  } else if (lowerKey.includes("d-m") || lowerKey.includes("dm") || lowerKey.includes("d moll") || lowerKey.includes("d-moll")) {
+    diatonicSet = new Set(["Dm", "F", "Bb", "C", "Gm", "Am", "A7", "Dm7", "Am7"]);
+  } else if (lowerKey.includes("g-d") || lowerKey.includes("g dur") || lowerKey.includes("g-dur") || lowerKey.includes("g major")) {
+    diatonicSet = new Set(["G", "Am", "Bm", "C", "D", "Em", "D7", "Em7", "Am7", "B7"]);
+  } else if (lowerKey.includes("c-d") || lowerKey.includes("c dur") || lowerKey.includes("c-dur") || lowerKey.includes("c major")) {
+    diatonicSet = new Set(["C", "Dm", "Em", "F", "G", "Am", "G7", "Am7", "Em7", "B7", "D7"]);
+  }
+
+  if (diatonicSet.has(upperChord)) {
+    return "Diatonic";
+  }
+
+  return "Borrowed";
+};
 import { 
   Music, 
   Volume2, 
@@ -182,6 +232,7 @@ export default function App() {
   const [chordSearchQuery, setChordSearchQuery] = useState<string>("");
   const [hoveredSuggestion, setHoveredSuggestion] = useState<string | null>(null);
   const [autoPreviewEnabled, setAutoPreviewEnabled] = useState<boolean>(false);
+  const [chordSortOrder, setChordSortOrder] = useState<"harmonic" | "root" | "alphabetic">("harmonic");
 
   useEffect(() => {
     setChordSearchQuery("");
@@ -1150,6 +1201,49 @@ ${activeRecipe.theoryReveal.simpleExplanation}
                     item.chord.toLowerCase().includes(chordSearchQuery.trim().toLowerCase())
                   );
 
+                  const sortedSuggestions = (() => {
+                    const temp = [...filteredSuggestions];
+                    if (chordSortOrder === "root") {
+                      const getRootPitch = (cName: string): number => {
+                        let r = "";
+                        if (cName.length >= 2 && (cName[1] === "#" || cName[1] === "b")) {
+                          r = cName.slice(0, 2);
+                        } else if (cName.length >= 1) {
+                          r = cName[0];
+                        }
+                        const pitchMap: { [key: string]: number } = {
+                          "C": 0, "C#": 1, "Db": 1,
+                          "D": 2, "D#": 3, "Eb": 3,
+                          "E": 4,
+                          "F": 5, "F#": 6, "Gb": 6,
+                          "G": 7, "G#": 8, "Ab": 8,
+                          "A": 9, "A#": 10, "Bb": 10,
+                          "B": 11
+                        };
+                        return pitchMap[r] !== undefined ? pitchMap[r] : 0;
+                      };
+                      const prevChord = editingSlotIndex !== null && editingSlotIndex > 0 
+                        ? activeChords[editingSlotIndex - 1] 
+                        : activeChords[activeChords.length - 1];
+                      const prevPitch = prevChord ? getRootPitch(prevChord) : 0;
+
+                      return temp.sort((a, b) => {
+                        const pitchA = getRootPitch(a.chord);
+                        const pitchB = getRootPitch(b.chord);
+                        const distA = Math.min(Math.abs(pitchA - prevPitch), 12 - Math.abs(pitchA - prevPitch));
+                        const distB = Math.min(Math.abs(pitchB - prevPitch), 12 - Math.abs(pitchB - prevPitch));
+                        if (distA !== distB) {
+                          return distA - distB;
+                        }
+                        return pitchA - pitchB;
+                      });
+                    } else if (chordSortOrder === "alphabetic") {
+                      return temp.sort((a, b) => a.chord.localeCompare(b.chord));
+                    } else {
+                      return temp.sort((a, b) => b.score - a.score);
+                    }
+                  })();
+
                   const containerVariants = {
                     hidden: { opacity: 0 },
                     show: {
@@ -1211,7 +1305,24 @@ ${activeRecipe.theoryReveal.simpleExplanation}
                           )}
                         </div>
 
-                        <div className="flex items-center gap-3 self-end sm:self-auto shrink-0 select-none">
+                        <div className="flex flex-wrap items-center gap-3 self-end sm:self-auto shrink-0 select-none">
+                          {/* Sorting Dropdown */}
+                          <div className="flex items-center gap-1.5" id="chord-suggestion-sort-container">
+                            <span className="text-[8.5px] font-mono font-bold text-gray-400 uppercase tracking-wider">
+                              Sortierung:
+                            </span>
+                            <select
+                              id="chord-suggestion-sort-select"
+                              value={chordSortOrder}
+                              onChange={(e) => setChordSortOrder(e.target.value as "harmonic" | "root" | "alphabetic")}
+                              className="bg-gray-900 border border-gray-800 text-gray-300 text-[9px] font-mono rounded py-0.5 px-1.5 focus:outline-none focus:border-amber-500 cursor-pointer"
+                            >
+                              <option value="harmonic">Harmonic Score</option>
+                              <option value="root">Root Movement</option>
+                              <option value="alphabetic">Alphabetic</option>
+                            </select>
+                          </div>
+
                           {/* Auto-Preview Toggle */}
                           <label className="flex items-center gap-1.5 cursor-pointer" id="auto-preview-toggle-label">
                             <input 
@@ -1227,12 +1338,12 @@ ${activeRecipe.theoryReveal.simpleExplanation}
                           </label>
 
                           <span className="text-[8.5px] font-mono text-gray-500 bg-gray-900 px-2 py-1 rounded border border-gray-850 select-none">
-                            Ergebnisse: {filteredSuggestions.length}
+                            Ergebnisse: {sortedSuggestions.length}
                           </span>
                         </div>
                       </div>
 
-                      {filteredSuggestions.length === 0 && (
+                      {sortedSuggestions.length === 0 && (
                         <div className="text-center py-8 text-gray-400 font-mono text-xs flex flex-col items-center justify-center gap-1.5 animate-fade-in">
                           <p className="text-base text-gray-500">🔍</p>
                           <p>Keine passenden Akkorde für <strong className="text-amber-400">"{chordSearchQuery}"</strong> gefunden.</p>
@@ -1240,7 +1351,7 @@ ${activeRecipe.theoryReveal.simpleExplanation}
                         </div>
                       )}
 
-                      {filteredSuggestions.length > 0 && (
+                      {sortedSuggestions.length > 0 && (
                         <>
                           {/* Suggestions list representation */}
                           {/* Two-column bento-inspired layout */}
@@ -1258,7 +1369,7 @@ ${activeRecipe.theoryReveal.simpleExplanation}
                                   animate="show"
                                   className="grid grid-cols-1 sm:grid-cols-2 gap-2"
                                 >
-                                  {filteredSuggestions.slice(0, 4).map((item) => {
+                                  {sortedSuggestions.slice(0, 4).map((item) => {
                                     const possibleChord = item.chord;
                                     const isSelected = activeChords[editingSlotIndex] === possibleChord;
                                     return (
@@ -1316,6 +1427,25 @@ ${activeRecipe.theoryReveal.simpleExplanation}
                                         <div className="flex items-center justify-between w-full">
                                           <div className="flex items-center gap-2">
                                             <span className="font-extrabold text-sm uppercase">{possibleChord}</span>
+                                            {(() => {
+                                              const tag = getChordTag(possibleChord, currentProgression.key);
+                                              const tagColorMap = {
+                                                Diatonic: isSelected 
+                                                  ? "bg-emerald-900/80 text-emerald-100 border-emerald-700/50" 
+                                                  : "bg-emerald-950/85 text-emerald-400 border-emerald-900/40",
+                                                Dominant: isSelected 
+                                                  ? "bg-amber-900/80 text-amber-100 border-amber-700/50" 
+                                                  : "bg-amber-950/85 text-amber-400 border-amber-900/40",
+                                                Borrowed: isSelected 
+                                                  ? "bg-purple-900/80 text-purple-100 border-purple-700/50" 
+                                                  : "bg-purple-950/85 text-purple-400 border-purple-900/40"
+                                              };
+                                              return (
+                                                <span className={`text-[8px] font-sans font-black px-1.5 py-0.2 rounded border uppercase tracking-wider ${tagColorMap[tag]}`}>
+                                                  {tag}
+                                                </span>
+                                              );
+                                            })()}
                                             <button
                                               type="button"
                                               onClick={(e) => {
@@ -1668,7 +1798,7 @@ ${activeRecipe.theoryReveal.simpleExplanation}
                           </div>
 
                           {/* Remaining collapsible or lower score chords */}
-                          {filteredSuggestions.length > 4 && (
+                          {sortedSuggestions.length > 4 && (
                             <div className="border-t border-gray-900 pt-3 mt-1.5">
                               <span className="text-[9px] font-mono text-gray-500 uppercase block mb-1.5">
                                 Andere d’accord-Möglichkeiten:
@@ -1679,7 +1809,7 @@ ${activeRecipe.theoryReveal.simpleExplanation}
                                 animate="show"
                                 className="grid grid-cols-5 gap-1.5"
                               >
-                                {filteredSuggestions.slice(4).map((item) => {
+                                {sortedSuggestions.slice(4).map((item) => {
                                   const possibleChord = item.chord;
                                   const isSelected = activeChords[editingSlotIndex] === possibleChord;
                                   return (
@@ -1728,13 +1858,30 @@ ${activeRecipe.theoryReveal.simpleExplanation}
                                           ease: "easeInOut"
                                         }
                                       }}
-                                      className={`py-1 rounded text-[10px] font-bold font-mono transition-colors text-center border cursor-pointer
+                                      className={`py-1.5 px-2 rounded text-[10px] font-bold font-mono transition-colors border cursor-pointer flex flex-col items-center justify-center gap-0.5
                                         ${isSelected
                                           ? "bg-amber-600 border-amber-500 text-white"
-                                          : "bg-gray-900 border-gray-850 text-gray-500 hover:text-white hover:border-gray-750"
+                                          : "bg-gray-900 border-gray-850 text-gray-400 hover:text-white hover:border-gray-750"
                                         }`}
                                     >
-                                      {possibleChord}
+                                      <span>{possibleChord}</span>
+                                      {(() => {
+                                        const tag = getChordTag(possibleChord, currentProgression.key);
+                                        const dotColors = {
+                                          Diatonic: "bg-emerald-500",
+                                          Dominant: "bg-amber-500",
+                                          Borrowed: "bg-purple-500"
+                                        };
+                                        const dotColor = dotColors[tag] || "bg-gray-500";
+                                        return (
+                                          <div className="flex items-center gap-1 mt-0.5" title={tag}>
+                                            <span className={`w-1 h-1 rounded-full ${dotColor}`} />
+                                            <span className="text-[6.5px] font-sans font-black uppercase tracking-wide opacity-75">
+                                              {tag.slice(0, 4)}
+                                            </span>
+                                          </div>
+                                        );
+                                      })()}
                                     </motion.button>
                                   );
                                 })}
