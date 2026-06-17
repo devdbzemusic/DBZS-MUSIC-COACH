@@ -12,7 +12,8 @@ import { DailySpark } from "./components/DailySpark";
 import { IdeaLibrary } from "./components/IdeaLibrary";
 import { WaveformVisualizer } from "./components/WaveformVisualizer";
 import { SongStructure } from "./components/SongStructure";
-import { playChord, playMetronomeTick, playShakerTick, playStrumPattern, getChordVoicing, setSoundCharacteristic, SoundCharacteristic } from "./utils/synth";
+import { playChord, playMetronomeTick, playShakerTick, playStrumPattern, getChordVoicing, setSoundCharacteristic, SoundCharacteristic, playSynthNoteInternal } from "./utils/synth";
+import { activateMidi, getMidiState, setSelectedInputId, setSelectedOutputId, setMidiThruEnabled } from "./utils/midi";
 
 export const CHORD_FORMULATIONS: { [key: string]: { note: string; octave?: number }[] } = {
   "Am": [{ note: "A", octave: 3 }, { note: "C", octave: 3 }, { note: "E", octave: 3 }],
@@ -178,7 +179,13 @@ export default function App() {
   const [customDurations, setCustomDurations] = useState<Record<string, number[]>>({});
   const [isEditMode, setIsEditMode] = useState<boolean>(false);
   const [editingSlotIndex, setEditingSlotIndex] = useState<number | null>(null);
+  const [chordSearchQuery, setChordSearchQuery] = useState<string>("");
   const [hoveredSuggestion, setHoveredSuggestion] = useState<string | null>(null);
+  const [autoPreviewEnabled, setAutoPreviewEnabled] = useState<boolean>(false);
+
+  useEffect(() => {
+    setChordSearchQuery("");
+  }, [editingSlotIndex]);
   const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
 
   // Active progression setup
@@ -506,6 +513,52 @@ export default function App() {
   const [stepDynamics, setStepDynamics] = useState<number[]>([1.4, 0.7, 1.1, 0.7, 1.3, 0.7, 1.1, 0.7]);
   const [humanize, setHumanize] = useState<number>(15); // Dynamic humanize offset (0-60ms range, defaults to 15)
 
+  // MIDI Controller Integrated Hub States
+  const [midiInfo, setMidiInfo] = useState({
+    isMidiActive: false,
+    inputs: [] as { id: string; name: string }[],
+    outputs: [] as { id: string; name: string }[],
+    selectedInputId: "all",
+    selectedOutputId: "none",
+    midiThruEnabled: true
+  });
+  const [midiActiveStatus, setMidiActiveStatus] = useState<"idle" | "connecting" | "active" | "error">("idle");
+  const [midiBlink, setMidiBlink] = useState<boolean>(false);
+
+  const handleMidiStateChange = () => {
+    setMidiInfo(getMidiState());
+  };
+
+  const handleMidiBlink = () => {
+    setMidiBlink(true);
+    setTimeout(() => setMidiBlink(false), 90);
+  };
+
+  const handleMidiInputNote = (noteName: string, octave: number, velocity: number) => {
+    // Play with false to deny outward MIDI replication matching standard local-off principles
+    playSynthNoteInternal(noteName, octave, 1.25, velocity, false);
+    handleMidiBlink();
+  };
+
+  const handleInitializeMidi = async () => {
+    setMidiActiveStatus("connecting");
+    const success = await activateMidi(
+      handleMidiStateChange,
+      handleMidiInputNote,
+      handleMidiBlink
+    );
+    if (success) {
+      setMidiActiveStatus("active");
+      setMidiInfo(getMidiState());
+    } else {
+      setMidiActiveStatus("error");
+    }
+  };
+
+  useEffect(() => {
+    handleInitializeMidi();
+  }, []);
+
   // Synchronize state variables to references for atomic, desync-free Web Audio timing
   const strumPatternRef = useRef(strumPattern);
   const stepDynamicsRef = useRef(stepDynamics);
@@ -762,7 +815,6 @@ ${activeRecipe.theoryReveal.simpleExplanation}
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono text-gray-400 block sm:inline mr-2">Est. Cozy Studio Vibe</span>
             <div className="flex bg-gray-900 border border-gray-800 p-0.5 rounded-lg text-xs" id="quick-tab-switcher">
               <button
                 id="tab-btn-learn"
@@ -1092,501 +1144,608 @@ ${activeRecipe.theoryReveal.simpleExplanation}
                 </div>
 
                 {/* Popover Inline Chord Selector with harmonically compatible suggestions */}
-                {editingSlotIndex !== null && editingSlotIndex < activeChords.length && (
-                  <div className="bg-gray-950 border border-amber-500/35 p-3.5 rounded-xl mb-4 animate-fade-in relative z-10 shadow-xl" id="smart-chord-selector-popover">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex flex-col">
-                        <span className="text-[10px] font-mono text-amber-400 uppercase font-bold tracking-wider flex items-center gap-1">
-                          <Sparkles size={11} className="text-amber-400 animate-pulse" />
-                          Harmonischer Berater für Slot #{editingSlotIndex + 1}
-                        </span>
-                        {activeChords.length > 1 && (
-                          <span className="text-[8.5px] text-gray-500 font-mono">
-                            Kontext: {activeChords[(editingSlotIndex - 1 + activeChords.length) % activeChords.length]} ➔ [?] ➔ {activeChords[(editingSlotIndex + 1) % activeChords.length]}
-                          </span>
-                        )}
-                      </div>
-                      <button 
-                        onClick={() => setEditingSlotIndex(null)}
-                        className="text-[9px] font-mono text-gray-500 hover:text-white uppercase transition-colors"
-                      >
-                        [X] Schließen
-                      </button>
-                    </div>
+                {editingSlotIndex !== null && editingSlotIndex < activeChords.length && (() => {
+                  const rawSuggestions = getSuggestedChordsForSlot(editingSlotIndex, activeChords, currentProgression.key);
+                  const filteredSuggestions = rawSuggestions.filter(item =>
+                    item.chord.toLowerCase().includes(chordSearchQuery.trim().toLowerCase())
+                  );
 
-                    {/* Suggestions list representation */}
-                    {/* Two-column bento-inspired layout */}
-                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 mt-3" id="smart-chord-selector-bento">
-                      
-                      {/* Left Side: Harmonic Recommendations list (7 cols) */}
-                      <div className="lg:col-span-7 space-y-2.5 flex flex-col justify-between">
-                        <div className="bg-indigo-950/20 border border-indigo-900/30 p-2.5 rounded-lg flex-1">
-                          <span className="text-[9.5px] font-mono font-bold text-indigo-400 uppercase tracking-widest block mb-2 px-0.5">
-                            ⭐ Harmonische Empfehlungen (Kontextbasiert):
+                  const containerVariants = {
+                    hidden: { opacity: 0 },
+                    show: {
+                      opacity: 1,
+                      transition: {
+                        staggerChildren: 0.05
+                      }
+                    }
+                  };
+
+                  const itemVariants = {
+                    hidden: { opacity: 0, y: 8 },
+                    show: { opacity: 1, y: 0, transition: { type: "spring" as const, stiffness: 350, damping: 24 } }
+                  };
+
+                  return (
+                    <div className="bg-gray-950 border border-amber-500/35 p-3.5 rounded-xl mb-4 animate-fade-in relative z-10 shadow-xl" id="smart-chord-selector-popover">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex flex-col">
+                          <span className="text-[10px] font-mono text-amber-400 uppercase font-bold tracking-wider flex items-center gap-1">
+                            <Sparkles size={11} className="text-amber-400 animate-pulse" />
+                            Harmonischer Berater für Slot #{editingSlotIndex + 1}
                           </span>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                            {getSuggestedChordsForSlot(editingSlotIndex, activeChords, currentProgression.key).slice(0, 4).map((item) => {
-                              const possibleChord = item.chord;
-                              const isSelected = activeChords[editingSlotIndex] === possibleChord;
-                              return (
-                                <motion.button
-                                  key={`suggested-${possibleChord}`}
-                                  type="button"
-                                  onMouseEnter={() => setHoveredSuggestion(possibleChord)}
-                                  onMouseLeave={() => setHoveredSuggestion(null)}
-                                  onClick={() => {
-                                    const updated = [...activeChords];
-                                    updated[editingSlotIndex] = possibleChord;
-                                    handleUpdateChords(updated);
-                                    setEditingSlotIndex(null);
-                                    setHoveredSuggestion(null);
-                                    
-                                    const notes = getChordVoicing(possibleChord, soundChar);
-                                    playChord(notes, 1.0);
-                                  }}
-                                  whileHover={{
-                                    scale: [1, 1.05, 1.01, 1.07, 1],
-                                    boxShadow: isSelected
-                                      ? [
-                                          "0 0 0px rgba(245, 158, 11, 0.4)",
-                                          "0 0 14px rgba(245, 158, 11, 0.8)",
-                                          "0 0 6px rgba(245, 158, 11, 0.5)",
-                                          "0 0 18px rgba(245, 158, 11, 0.9)",
-                                          "0 0 0px rgba(245, 158, 11, 0.4)"
-                                        ]
-                                      : [
-                                          "0 0 0px rgba(99, 102, 241, 0)",
-                                          "0 0 12px rgba(99, 102, 241, 0.5)",
-                                          "0 0 4px rgba(99, 102, 241, 0.2)",
-                                          "0 0 16px rgba(99, 102, 241, 0.7)",
-                                          "0 0 0px rgba(99, 102, 241, 0)"
-                                        ],
-                                    transition: {
-                                      duration: 60 / bpm,
-                                      repeat: Infinity,
-                                      ease: "easeInOut"
-                                    }
-                                  }}
-                                  className={`p-2.5 rounded-lg text-left text-xs font-mono transition-all flex flex-col justify-between border cursor-pointer hover:border-amber-400/50
-                                    ${isSelected
-                                      ? "bg-amber-600 border-amber-500 text-white shadow-md shadow-amber-950/20"
-                                      : "bg-gray-900 border-gray-800 hover:border-gray-750 text-gray-300"
-                                    }`}
+                          {activeChords.length > 1 && (
+                            <span className="text-[8.5px] text-gray-500 font-mono">
+                              Kontext: {activeChords[(editingSlotIndex - 1 + activeChords.length) % activeChords.length]} ➔ [?] ➔ {activeChords[(editingSlotIndex + 1) % activeChords.length]}
+                            </span>
+                          )}
+                        </div>
+                        <button 
+                          onClick={() => setEditingSlotIndex(null)}
+                          className="text-[9px] font-mono text-gray-500 hover:text-white uppercase transition-colors"
+                        >
+                          [X] Schließen
+                        </button>
+                      </div>
+
+                      {/* Interactive Search Input Sub-Section */}
+                      <div className="mt-2.5 pb-2.5 border-b border-gray-900/80 flex flex-col sm:flex-row sm:items-center gap-2.5 justify-between">
+                        <div className="relative flex-1 w-full">
+                          <input
+                            id="chord-search-input"
+                            type="text"
+                            value={chordSearchQuery}
+                            onChange={(e) => setChordSearchQuery(e.target.value)}
+                            placeholder="Akkord filtern/suchen (z.B. C, Am, Em7...)"
+                            className="w-full bg-gray-900/95 border border-gray-800 focus:border-amber-500 rounded-lg py-1 px-2.5 text-[10px] font-mono text-gray-200 placeholder-gray-500 focus:outline-none transition-all"
+                            autoComplete="off"
+                          />
+                          {chordSearchQuery && (
+                            <button
+                              type="button"
+                              onClick={() => setChordSearchQuery("")}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] font-semibold text-gray-500 hover:text-gray-300 w-4 h-4 flex items-center justify-center rounded-full hover:bg-gray-800 transition-all cursor-pointer"
+                              title="Text zurücksetzen"
+                            >
+                              ×
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-3 self-end sm:self-auto shrink-0 select-none">
+                          {/* Auto-Preview Toggle */}
+                          <label className="flex items-center gap-1.5 cursor-pointer" id="auto-preview-toggle-label">
+                            <input 
+                              type="checkbox" 
+                              checked={autoPreviewEnabled} 
+                              onChange={(e) => setAutoPreviewEnabled(e.target.checked)}
+                              className="sr-only peer"
+                            />
+                            <div className="relative w-7 h-4 bg-gray-800 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:start-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-amber-500"></div>
+                            <span className="text-[8.5px] font-mono font-bold text-gray-400 uppercase tracking-wider" title="Akkord-Ton beim Berühren automatisch abspielen">
+                              Auto-Preview
+                            </span>
+                          </label>
+
+                          <span className="text-[8.5px] font-mono text-gray-500 bg-gray-900 px-2 py-1 rounded border border-gray-850 select-none">
+                            Ergebnisse: {filteredSuggestions.length}
+                          </span>
+                        </div>
+                      </div>
+
+                      {filteredSuggestions.length === 0 && (
+                        <div className="text-center py-8 text-gray-400 font-mono text-xs flex flex-col items-center justify-center gap-1.5 animate-fade-in">
+                          <p className="text-base text-gray-500">🔍</p>
+                          <p>Keine passenden Akkorde für <strong className="text-amber-400">"{chordSearchQuery}"</strong> gefunden.</p>
+                          <p className="text-[9px] text-gray-500">Versuche es mit Akkordnamen wie C, Am, Em7, F oder Bb.</p>
+                        </div>
+                      )}
+
+                      {filteredSuggestions.length > 0 && (
+                        <>
+                          {/* Suggestions list representation */}
+                          {/* Two-column bento-inspired layout */}
+                          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 mt-3.5" id="smart-chord-selector-bento">
+                            
+                            {/* Left Side: Harmonic Recommendations list (7 cols) */}
+                            <div className="lg:col-span-7 space-y-2.5 flex flex-col justify-between">
+                              <div className="bg-indigo-950/20 border border-indigo-900/30 p-2.5 rounded-lg flex-1">
+                                <span className="text-[9.5px] font-mono font-bold text-indigo-400 uppercase tracking-widest block mb-2 px-0.5">
+                                  ⭐ Harmonische Empfehlungen (Kontextbasiert):
+                                </span>
+                                <motion.div 
+                                  variants={containerVariants}
+                                  initial="hidden"
+                                  animate="show"
+                                  className="grid grid-cols-1 sm:grid-cols-2 gap-2"
                                 >
-                                  <div className="flex items-center justify-between w-full">
-                                    <div className="flex items-center gap-2">
-                                      <span className="font-extrabold text-sm uppercase">{possibleChord}</span>
-                                      <button
+                                  {filteredSuggestions.slice(0, 4).map((item) => {
+                                    const possibleChord = item.chord;
+                                    const isSelected = activeChords[editingSlotIndex] === possibleChord;
+                                    return (
+                                      <motion.button
+                                        variants={itemVariants}
+                                        key={`suggested-${possibleChord}`}
                                         type="button"
-                                        onClick={(e) => {
-                                          e.stopPropagation(); // prevent selecting/closing the slot popover
+                                        onMouseEnter={() => {
+                                          setHoveredSuggestion(possibleChord);
+                                          if (autoPreviewEnabled) {
+                                            const notes = getChordVoicing(possibleChord, soundChar);
+                                            playChord(notes, 1.0);
+                                          }
+                                        }}
+                                        onMouseLeave={() => setHoveredSuggestion(null)}
+                                        onClick={() => {
+                                          const updated = [...activeChords];
+                                          updated[editingSlotIndex] = possibleChord;
+                                          handleUpdateChords(updated);
+                                          setEditingSlotIndex(null);
+                                          setHoveredSuggestion(null);
+                                          
                                           const notes = getChordVoicing(possibleChord, soundChar);
                                           playChord(notes, 1.0);
                                         }}
-                                        className={`p-1 rounded-md transition-all flex items-center justify-center cursor-pointer border hover:scale-110 active:scale-95
-                                          ${isSelected 
-                                            ? "bg-amber-800/80 hover:bg-amber-900 text-white border-amber-400/40" 
-                                            : "bg-gray-950 hover:bg-gray-850 text-amber-400 border-gray-850 hover:border-gray-700 font-bold"}`}
-                                        title="Akkord vorhören (Preview)"
-                                        id={`preview-chord-${possibleChord}`}
+                                        whileHover={{
+                                          scale: [1, 1.05, 1.01, 1.07, 1],
+                                          boxShadow: isSelected
+                                            ? [
+                                                "0 0 0px rgba(245, 158, 11, 0.4)",
+                                                "0 0 14px rgba(245, 158, 11, 0.8)",
+                                                "0 0 6px rgba(245, 158, 11, 0.5)",
+                                                "0 0 18px rgba(245, 158, 11, 0.9)",
+                                                "0 0 0px rgba(245, 158, 11, 0.4)"
+                                              ]
+                                            : [
+                                                "0 0 0px rgba(99, 102, 241, 0)",
+                                                "0 0 12px rgba(99, 102, 241, 0.5)",
+                                                "0 0 4px rgba(99, 102, 241, 0.2)",
+                                                "0 0 16px rgba(99, 102, 241, 0.7)",
+                                                "0 0 0px rgba(99, 102, 241, 0)"
+                                              ],
+                                          transition: {
+                                            duration: 60 / bpm,
+                                            repeat: Infinity,
+                                            ease: "easeInOut"
+                                          }
+                                        }}
+                                        className={`p-2.5 rounded-lg text-left text-xs font-mono transition-all flex flex-col justify-between border cursor-pointer hover:border-amber-400/50
+                                          ${isSelected
+                                            ? "bg-amber-600 border-amber-500 text-white shadow-md shadow-amber-950/20"
+                                            : "bg-gray-900 border-gray-800 hover:border-gray-750 text-gray-300"
+                                          }`}
                                       >
-                                        <Play size={8} className="fill-amber-400 stroke-amber-400" />
-                                      </button>
-                                    </div>
-                                    <span className={`text-[8px] px-1 py-0.2 rounded font-bold uppercase
-                                      ${item.score >= 10 ? "bg-emerald-950 text-emerald-400 border border-emerald-900" : "bg-indigo-950 text-indigo-400 border border-indigo-900"}`}>
-                                      Score: +{item.score}
-                                    </span>
-                                  </div>
-                                  <span className={`text-[9.5px] mt-1.5 italic leading-snug block
-                                    ${isSelected ? "text-amber-100" : "text-gray-400"}`}>
-                                    💡 {item.reason}
-                                  </span>
-
-                                  {/* Visual Stimmführung (Voice leading / inter-tone intervals) schematic */}
-                                  {(() => {
-                                    const chordNotes = getChordVoicing(possibleChord, soundChar);
-                                    return (
-                                      <div className="mt-2.5 pt-2 border-t border-gray-800/60 w-full" id={`stimmfuehrung-mini-${possibleChord}`}>
-                                        <div className="flex items-center justify-between text-[8px] font-mono mb-1 text-gray-500 font-bold uppercase tracking-wider">
-                                          <span>Stimmführung (Akkordtöne)</span>
-                                          <span className={isSelected ? "text-amber-200" : "text-amber-400"}>Halbtöne</span>
-                                        </div>
-                                        <div className="flex items-center gap-1 overflow-x-auto scrollbar-none py-0.5">
-                                          {chordNotes.map((n, index) => {
-                                            const isLast = index === chordNotes.length - 1;
-                                            const nextNote = !isLast ? chordNotes[index + 1] : null;
-                                            
-                                            // Calculate pitch details
-                                            const cleanNote = n.note;
-                                            const oct = n.octave ?? 3;
-                                            const pCurrent = getPitchValue(cleanNote, oct);
-                                            const pNext = nextNote ? getPitchValue(nextNote.note, nextNote.octave ?? 3) : 0;
-                                            
-                                            const semitoneDistance = pNext - pCurrent;
-                                            
-                                            return (
-                                              <div key={`rec-tone-${possibleChord}-${index}`} className="flex items-center shrink-0">
-                                                {/* Note circular/oval tag */}
-                                                {(() => {
-                                                  const interval = getChordInterval(possibleChord, cleanNote);
-                                                  return (
-                                                    <span className={`px-1.5 py-0.5 rounded text-[8.5px] font-mono font-bold border transition-all flex items-center gap-1
-                                                      ${isSelected
-                                                        ? "bg-amber-600/80 text-white border-amber-400/60"
-                                                        : `${interval.colorClass}`
-                                                      }`}
-                                                    >
-                                                      <span>
-                                                        {cleanNote}
-                                                        <span className="text-[6.5px] opacity-75 ml-0.5">{oct}</span>
-                                                      </span>
-                                                      <span className={`text-[7px] font-extrabold px-0.5 py-0.2 rounded ${isSelected ? "bg-amber-900/50 text-amber-200" : "opacity-90 bg-black/45 text-gray-300 font-mono leading-none"}`} title={`Intervall: ${interval.label}`}>
-                                                        {interval.label}
-                                                      </span>
-                                                    </span>
-                                                  );
-                                                })()}
-                                                
-                                                {/* Interval indicator badge */}
-                                                {!isLast && (
-                                                  <div className="flex items-center mx-0.5 shrink-0" title={`Abstand: ${semitoneDistance} Halbtöne`}>
-                                                    <span className="text-[8px] text-gray-600 font-bold">➔</span>
-                                                    <span className={`text-[8px] font-mono font-bold px-0.5 py-0.2 rounded mx-0.2
-                                                      ${isSelected
-                                                        ? "bg-amber-950/50 text-amber-300"
-                                                        : "bg-indigo-950/40 text-indigo-400"
-                                                      }`}
-                                                    >
-                                                      +{semitoneDistance}
-                                                    </span>
-                                                  </div>
-                                                )}
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
-                                      </div>
-                                    );
-                                  })()}
-                                </motion.button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Right Side: Interactive Animated Voice Leading Graphics Core (5 cols) */}
-                      {(() => {
-                        const prevChordName = editingSlotIndex > 0 ? activeChords[editingSlotIndex - 1] : activeChords[activeChords.length - 1];
-                        const targetChordName = hoveredSuggestion || activeChords[editingSlotIndex] || (getSuggestedChordsForSlot(editingSlotIndex, activeChords, currentProgression.key)[0]?.chord || "C");
-                        
-                        const prevChordNotes = getChordVoicing(prevChordName, soundChar);
-                        const targetChordNotes = getChordVoicing(targetChordName, soundChar);
-                        
-                        const matchVoiceLeading = (
-                          pNotes: typeof prevChordNotes,
-                          tNotes: typeof targetChordNotes
-                        ) => {
-                          const prevPitches = pNotes.map((n, idx) => ({
-                            id: `p-${idx}`,
-                            note: n.note,
-                            octave: n.octave ?? 3,
-                            pitch: getPitchValue(n.note, n.octave ?? 3),
-                            originalIndex: idx
-                          }));
-
-                          const nextPitches = tNotes.map((n, idx) => ({
-                            id: `n-${idx}`,
-                            note: n.note,
-                            octave: n.octave ?? 3,
-                            pitch: getPitchValue(n.note, n.octave ?? 3),
-                            originalIndex: idx
-                          }));
-
-                          const connections: { prevIdx: number; nextIdx: number; semitoneDiff: number; isEfficient: boolean }[] = [];
-                          
-                          prevPitches.forEach((p, pIdx) => {
-                            let bestNextIdx = 0;
-                            let minDiff = Infinity;
-                            nextPitches.forEach((n, nIdx) => {
-                              const diff = Math.abs(p.pitch - n.pitch);
-                              if (diff < minDiff) {
-                                minDiff = diff;
-                                bestNextIdx = nIdx;
-                              }
-                            });
-                            
-                            const realDiff = nextPitches[bestNextIdx].pitch - p.pitch;
-                            connections.push({
-                              prevIdx: pIdx,
-                              nextIdx: bestNextIdx,
-                              semitoneDiff: realDiff,
-                              isEfficient: Math.abs(realDiff) <= 2
-                            });
-                          });
-
-                          return { prevPitches, nextPitches, connections };
-                        };
-
-                        const { connections } = matchVoiceLeading(prevChordNotes, targetChordNotes);
-                        const commonTonesCount = connections.filter(c => c.semitoneDiff === 0).length;
-                        const efficientShiftsCount = connections.filter(c => Math.abs(c.semitoneDiff) > 0 && Math.abs(c.semitoneDiff) <= 2).length;
-                        const avgShift = connections.reduce((acc, c) => acc + Math.abs(c.semitoneDiff), 0) / Math.max(1, connections.length);
-
-                        return (
-                          <div className="lg:col-span-5 bg-gray-900/90 border border-gray-800/80 rounded-xl p-3 flex flex-col justify-between h-full min-h-[320px] shadow-inner font-mono" id="voice-leading-interactive-panel">
-                            {/* Panel header */}
-                            <div>
-                              <div className="flex items-center justify-between text-[10px] font-mono font-bold uppercase tracking-wider text-amber-400">
-                                <span className="flex items-center gap-1">
-                                  <Sparkles size={11} className="text-amber-400 animate-pulse" />
-                                  Stimmführungspfad
-                                </span>
-                                <span className="text-[9px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full font-mono">
-                                  {hoveredSuggestion ? "Hover Vorschau" : "Ausgewählt"}
-                                </span>
-                              </div>
-                              <p className="text-[9px] text-gray-400 mt-1 leading-snug">
-                                Verbindung von <span className="text-indigo-400 font-bold">{prevChordName}</span> zu <span className="text-amber-400 font-bold">{targetChordName}</span>. Die hellsten Linien zeigen optimale, fließende Stimmführung.
-                              </p>
-                            </div>
-
-                            {/* Dynamic SVG Board */}
-                            <div className="relative flex-1 flex items-center justify-between my-2 border border-gray-800/50 rounded-lg p-2.5 bg-gray-950/90 h-[190px]" id="voice-leading-canvas">
-                              
-                              {/* Left Column (Previous) */}
-                              <div className="flex flex-col justify-between h-full z-10 w-22">
-                                <div className="text-[10px] font-mono font-extrabold text-indigo-400 text-center mb-1 bg-indigo-950/40 border border-indigo-900/40 py-0.5 rounded uppercase">
-                                  {prevChordName}
-                                </div>
-                                <div className="flex-1 flex flex-col justify-around py-1 gap-1.5 w-full">
-                                  {prevChordNotes.map((n, idx) => {
-                                    const interval = getChordInterval(prevChordName, n.note);
-                                    return (
-                                      <div key={`vl-prev-chord-${idx}`} className="flex items-center gap-1.5 justify-start w-full">
-                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                          interval.label === "R" ? "bg-emerald-500" :
-                                          interval.label.includes("3") ? "bg-blue-400" :
-                                          interval.label === "5" ? "bg-amber-400" :
-                                          interval.label.includes("7") ? "bg-purple-400" :
-                                          "bg-indigo-450"
-                                        } animate-pulse`} />
-                                        <span className={`text-[9.5px] font-mono font-extrabold px-1.5 py-0.5 rounded border transition-all flex items-center justify-between flex-1 ${interval.colorClass}`}>
-                                          <span>
-                                            {n.note}<span className="text-[7px] opacity-65 font-semibold ml-0.5">{n.octave ?? 3}</span>
-                                          </span>
-                                          <span className="text-[7.5px] font-black opacity-80 uppercase leading-none font-mono">{interval.label}</span>
-                                        </span>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-
-                              {/* SVG Overlay */}
-                              <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 300 200" preserveAspectRatio="none" style={{ zIndex: 5 }}>
-                                <g>
-                                  {connections.map((conn, cIdx) => {
-                                    const M = prevChordNotes.length;
-                                    const N = targetChordNotes.length;
-
-                                    const sX = 75;
-                                    const eX = 225;
-                                    const sY = M > 1 ? 40 + (conn.prevIdx * (125 / (M - 1))) : 100;
-                                    const eY = N > 1 ? 40 + (conn.nextIdx * (125 / (N - 1))) : 100;
-
-                                    const cpX1 = sX + 45;
-                                    const cpY1 = sY;
-                                    const cpX2 = eX - 45;
-                                    const cpY2 = eY;
-
-                                    const absDiff = Math.abs(conn.semitoneDiff);
-                                    let strokeColor = "#4B5563"; // default dim
-                                    let glowColor = "rgba(75, 85, 99, 0.2)";
-                                    let labelStyle = "text-gray-500 bg-gray-950 border border-gray-900";
-                                    let strokeWidth = "1.5";
-                                    let isDashed = true;
-
-                                    if (absDiff === 0) {
-                                      strokeColor = "#10B981"; // super clean, emerald green for common tone holding index
-                                      glowColor = "rgba(16, 185, 129, 0.4)";
-                                      strokeWidth = "2.5";
-                                      isDashed = false;
-                                      labelStyle = "text-emerald-400 bg-emerald-950 border border-emerald-900/80 font-bold";
-                                    } else if (absDiff <= 2) {
-                                      strokeColor = "#34D399"; // beautiful soft mint emerald for smooth voice leading transitions (1-2 semitones)
-                                      glowColor = "rgba(52, 211, 153, 0.3)";
-                                      strokeWidth = "2";
-                                      isDashed = false;
-                                      labelStyle = "text-teal-300 bg-teal-950 border border-teal-900/60 font-bold";
-                                    } else if (absDiff <= 4) {
-                                      strokeColor = "#F59E0B"; // fine amber transition
-                                      strokeWidth = "1.5";
-                                      isDashed = true;
-                                      labelStyle = "text-amber-400 bg-gray-900 border border-amber-900/20";
-                                    } else {
-                                      strokeColor = "#6366F1"; // standard jump
-                                      strokeWidth = "1";
-                                      isDashed = true;
-                                      labelStyle = "text-indigo-400 bg-indigo-950 border border-indigo-900/20";
-                                    }
-
-                                    const midX = (sX + eX) / 2;
-                                    const midY = (sY + eY) / 2;
-
-                                    return (
-                                      <g key={`v-path-${cIdx}`} className="transition-all duration-300">
-                                        {/* Glow Layer */}
-                                        {!isDashed && (
-                                          <path
-                                            d={`M ${sX} ${sY} C ${cpX1} ${cpY1}, ${cpX2} ${cpY2}, ${eX} ${eY}`}
-                                            fill="none"
-                                            stroke={strokeColor}
-                                            strokeWidth="5"
-                                            strokeOpacity="0.25"
-                                          />
-                                        )}
-                                        {/* Core dynamic line */}
-                                        <path
-                                          d={`M ${sX} ${sY} C ${cpX1} ${cpY1}, ${cpX2} ${cpY2}, ${eX} ${eY}`}
-                                          fill="none"
-                                          stroke={strokeColor}
-                                          strokeWidth={strokeWidth}
-                                          strokeDasharray={isDashed ? "3,3" : "none"}
-                                          className={`transition-all duration-300 ${!isDashed ? "stroke-dashoffset-anim" : ""}`}
-                                        />
-
-                                        {/* Connecting text indicator card */}
-                                        <foreignObject
-                                          x={midX - 18}
-                                          y={midY - 8}
-                                          width="36"
-                                          height="16"
-                                          className="overflow-visible"
-                                        >
-                                          <div className={`flex items-center justify-center text-[7.5px] font-mono leading-none rounded px-1 py-0.5 text-center shadow select-none ${labelStyle}`}>
-                                            {conn.semitoneDiff === 0 ? "Hold" : `${conn.semitoneDiff > 0 ? "+" : ""}${conn.semitoneDiff}`}
+                                        <div className="flex items-center justify-between w-full">
+                                          <div className="flex items-center gap-2">
+                                            <span className="font-extrabold text-sm uppercase">{possibleChord}</span>
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation(); // prevent selecting/closing the slot popover
+                                                const notes = getChordVoicing(possibleChord, soundChar);
+                                                playChord(notes, 1.0);
+                                              }}
+                                              className={`p-1 rounded-md transition-all flex items-center justify-center cursor-pointer border hover:scale-110 active:scale-95
+                                                ${isSelected 
+                                                  ? "bg-amber-800/80 hover:bg-amber-900 text-white border-amber-400/40" 
+                                                  : "bg-gray-950 hover:bg-gray-850 text-amber-400 border-gray-850 hover:border-gray-700 font-bold"}`}
+                                              title="Akkord vorhören (Preview)"
+                                              id={`preview-chord-${possibleChord}`}
+                                            >
+                                              <Play size={8} className="fill-amber-400 stroke-amber-400" />
+                                            </button>
                                           </div>
-                                        </foreignObject>
-                                      </g>
-                                    );
-                                  })}
-                                </g>
-                              </svg>
-
-                              {/* Right Column (Next Target) */}
-                              <div className="flex flex-col justify-between h-full z-10 w-22 items-end">
-                                <div className="text-[10px] font-mono font-extrabold text-amber-400 text-center mb-1 bg-amber-950/40 border border-amber-900/40 py-0.5 px-2 rounded uppercase">
-                                  {targetChordName}
-                                </div>
-                                <div className="flex-1 flex flex-col justify-around py-1 gap-1.5 w-full items-end font-bold">
-                                  {targetChordNotes.map((n, idx) => {
-                                    const interval = getChordInterval(targetChordName, n.note);
-                                    return (
-                                      <div key={`vl-target-chord-${idx}`} className="flex items-center gap-1.5 justify-end w-full">
-                                        <span className={`text-[9.5px] font-mono font-extrabold px-1.5 py-0.5 rounded border transition-all flex items-center justify-between flex-1 ${interval.colorClass}`}>
-                                          <span className="text-[7.5px] font-black opacity-80 uppercase leading-none font-mono">{interval.label}</span>
-                                          <span>
-                                            {n.note}<span className="text-[7px] opacity-65 font-semibold ml-0.5">{n.octave ?? 3}</span>
+                                          <span className={`text-[8px] px-1 py-0.2 rounded font-bold uppercase
+                                            ${item.score >= 10 ? "bg-emerald-950 text-emerald-400 border border-emerald-900" : "bg-indigo-950 text-indigo-400 border border-indigo-900"}`}>
+                                            Score: +{item.score}
                                           </span>
+                                        </div>
+                                        <span className={`text-[9.5px] mt-1.5 italic leading-snug block
+                                          ${isSelected ? "text-amber-100" : "text-gray-400"}`}>
+                                          💡 {item.reason}
                                         </span>
-                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                          interval.label === "R" ? "bg-emerald-500" :
-                                          interval.label.includes("3") ? "bg-blue-400" :
-                                          interval.label === "5" ? "bg-amber-400" :
-                                          interval.label.includes("7") ? "bg-purple-400" :
-                                          "bg-amber-405/80"
-                                        }`} />
-                                      </div>
+
+                                        {/* Visual Stimmführung (Voice leading / inter-tone intervals) schematic */}
+                                        {(() => {
+                                          const chordNotes = getChordVoicing(possibleChord, soundChar);
+                                          return (
+                                            <div className="mt-2.5 pt-2 border-t border-gray-800/60 w-full" id={`stimmfuehrung-mini-${possibleChord}`}>
+                                              <div className="flex items-center justify-between text-[8px] font-mono mb-1 text-gray-500 font-bold uppercase tracking-wider">
+                                                <span>Stimmführung (Akkordtöne)</span>
+                                                <span className={isSelected ? "text-amber-200" : "text-amber-400"}>Halbtöne</span>
+                                              </div>
+                                              <div className="flex items-center gap-1 overflow-x-auto scrollbar-none py-0.5">
+                                                {chordNotes.map((n, index) => {
+                                                  const isLast = index === chordNotes.length - 1;
+                                                  const nextNote = !isLast ? chordNotes[index + 1] : null;
+                                                  
+                                                  // Calculate pitch details
+                                                  const cleanNote = n.note;
+                                                  const oct = n.octave ?? 3;
+                                                  const pCurrent = getPitchValue(cleanNote, oct);
+                                                  const pNext = nextNote ? getPitchValue(nextNote.note, nextNote.octave ?? 3) : 0;
+                                                  
+                                                  const semitoneDistance = pNext - pCurrent;
+                                                  
+                                                  return (
+                                                    <div key={`rec-tone-${possibleChord}-${index}`} className="flex items-center shrink-0">
+                                                      {/* Note circular/oval tag */}
+                                                      {(() => {
+                                                        const interval = getChordInterval(possibleChord, cleanNote);
+                                                        return (
+                                                          <span className={`px-1.5 py-0.5 rounded text-[8.5px] font-mono font-bold border transition-all flex items-center gap-1
+                                                            ${isSelected
+                                                              ? "bg-amber-600/80 text-white border-amber-400/60"
+                                                              : `${interval.colorClass}`
+                                                            }`}
+                                                          >
+                                                            <span>
+                                                              {cleanNote}
+                                                              <span className="text-[6.5px] opacity-75 ml-0.5">{oct}</span>
+                                                            </span>
+                                                            <span className={`text-[7px] font-extrabold px-0.5 py-0.2 rounded ${isSelected ? "bg-amber-900/50 text-amber-200" : "opacity-90 bg-black/45 text-gray-300 font-mono leading-none"}`} title={`Intervall: ${interval.label}`}>
+                                                              {interval.label}
+                                                            </span>
+                                                          </span>
+                                                        );
+                                                      })()}
+                                                      
+                                                      {/* Interval indicator badge */}
+                                                      {!isLast && (
+                                                        <div className="flex items-center mx-0.5 shrink-0" title={`Abstand: ${semitoneDistance} Halbtöne`}>
+                                                          <span className="text-[8px] text-gray-600 font-bold">➔</span>
+                                                          <span className={`text-[8px] font-mono font-bold px-0.5 py-0.2 rounded mx-0.2
+                                                            ${isSelected
+                                                              ? "bg-amber-950/50 text-amber-300"
+                                                              : "bg-indigo-950/40 text-indigo-400"
+                                                            }`}
+                                                          >
+                                                            +{semitoneDistance}
+                                                          </span>
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                  );
+                                                })}
+                                              </div>
+                                            </div>
+                                          );
+                                        })()}
+                                      </motion.button>
                                     );
                                   })}
-                                </div>
-                              </div>
-
-                            </div>
-
-                            {/* Dynamic mini efficiency statistics */}
-                            <div className="bg-gray-950 border border-gray-800/50 rounded-lg p-2 flex items-center justify-between text-[8px] font-mono text-gray-400 mt-1" id="voice-leading-analysis-legend">
-                              <div className="flex items-center gap-1">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                                <span>Halte-Töne: <strong className="text-emerald-400">{commonTonesCount}</strong></span>
-                              </div>
-                              <div className="flex items-center gap-1">
-                                <span className="w-1.5 h-1.5 rounded-full bg-teal-400" />
-                                <span>Flow-Schritte: <strong className="text-teal-400">{efficientShiftsCount}</strong></span>
-                              </div>
-                              <div className="flex items-center gap-1">
-                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                                <span>Ø Distanz: <strong className="text-amber-400">{avgShift.toFixed(1)}</strong></span>
+                                </motion.div>
                               </div>
                             </div>
-                          </div>
-                        );
-                      })()}
 
-                    </div>
+                            {/* Right Side: Interactive Animated Voice Leading Graphics Core (5 cols) */}
+                            {(() => {
+                              const prevChordName = editingSlotIndex > 0 ? activeChords[editingSlotIndex - 1] : activeChords[activeChords.length - 1];
+                              const targetChordName = hoveredSuggestion || activeChords[editingSlotIndex] || (filteredSuggestions[0]?.chord || "C");
+                              
+                              const prevChordNotes = getChordVoicing(prevChordName, soundChar);
+                              const targetChordNotes = getChordVoicing(targetChordName, soundChar);
+                              
+                              const matchVoiceLeading = (
+                                pNotes: typeof prevChordNotes,
+                                tNotes: typeof targetChordNotes
+                              ) => {
+                                const prevPitches = pNotes.map((n, idx) => ({
+                                  id: `p-${idx}`,
+                                  note: n.note,
+                                  octave: n.octave ?? 3,
+                                  pitch: getPitchValue(n.note, n.octave ?? 3),
+                                  originalIndex: idx
+                                }));
 
-                      {/* Remaining collapsible or lower score chords */}
-                      <div className="border-t border-gray-900 pt-2.5">
-                        <span className="text-[9px] font-mono text-gray-500 uppercase block mb-1.5">
-                          Andere d’accord-Möglichkeiten:
-                        </span>
-                        <div className="grid grid-cols-5 gap-1.5">
-                          {getSuggestedChordsForSlot(editingSlotIndex, activeChords, currentProgression.key).slice(4).map((item) => {
-                            const possibleChord = item.chord;
-                            const isSelected = activeChords[editingSlotIndex] === possibleChord;
-                            return (
-                              <motion.button
-                                key={`other-${possibleChord}`}
-                                type="button"
-                                title={item.reason}
-                                onClick={() => {
-                                  const updated = [...activeChords];
-                                  updated[editingSlotIndex] = possibleChord;
-                                  handleUpdateChords(updated);
-                                  setEditingSlotIndex(null);
+                                const nextPitches = tNotes.map((n, idx) => ({
+                                  id: `n-${idx}`,
+                                  note: n.note,
+                                  octave: n.octave ?? 3,
+                                  pitch: getPitchValue(n.note, n.octave ?? 3),
+                                  originalIndex: idx
+                                }));
+
+                                const connections: { prevIdx: number; nextIdx: number; semitoneDiff: number; isEfficient: boolean }[] = [];
+                                
+                                prevPitches.forEach((p, pIdx) => {
+                                  let bestNextIdx = 0;
+                                  let minDiff = Infinity;
+                                  nextPitches.forEach((n, nIdx) => {
+                                    const diff = Math.abs(p.pitch - n.pitch);
+                                    if (diff < minDiff) {
+                                      minDiff = diff;
+                                      bestNextIdx = nIdx;
+                                    }
+                                  });
                                   
-                                  const notes = getChordVoicing(possibleChord, soundChar);
-                                  playChord(notes, 1.0);
-                                }}
-                                whileHover={{
-                                  scale: [1, 1.04, 1.01, 1.06, 1],
-                                  boxShadow: isSelected
-                                    ? [
-                                        "0 0 0px rgba(245, 158, 11, 0.4)",
-                                        "0 0 10px rgba(245, 158, 11, 0.7)",
-                                        "0 0 4px rgba(245, 158, 11, 0.4)",
-                                        "0 0 12px rgba(245, 158, 11, 0.8)",
-                                        "0 0 0px rgba(245, 158, 11, 0.4)"
-                                      ]
-                                    : [
-                                        "0 0 0px rgba(156, 163, 175, 0)",
-                                        "0 0 8px rgba(156, 163, 175, 0.4)",
-                                        "0 0 3px rgba(156, 163, 175, 0.15)",
-                                        "0 0 10px rgba(156, 163, 175, 0.5)",
-                                        "0 0 0px rgba(156, 163, 175, 0)"
-                                      ],
-                                  transition: {
-                                    duration: 60 / bpm,
-                                    repeat: Infinity,
-                                    ease: "easeInOut"
-                                  }
-                                }}
-                                className={`py-1 rounded text-[10px] font-bold font-mono transition-colors text-center border cursor-pointer
-                                  ${isSelected
-                                    ? "bg-amber-600 border-amber-500 text-white"
-                                    : "bg-gray-900 border-gray-850 text-gray-500 hover:text-white hover:border-gray-750"
-                                  }`}
+                                  const realDiff = nextPitches[bestNextIdx].pitch - p.pitch;
+                                  connections.push({
+                                    prevIdx: pIdx,
+                                    nextIdx: bestNextIdx,
+                                    semitoneDiff: realDiff,
+                                    isEfficient: Math.abs(realDiff) <= 2
+                                  });
+                                });
+
+                                return { prevPitches, nextPitches, connections };
+                              };
+
+                              const { connections } = matchVoiceLeading(prevChordNotes, targetChordNotes);
+                              const commonTonesCount = connections.filter(c => c.semitoneDiff === 0).length;
+                              const efficientShiftsCount = connections.filter(c => Math.abs(c.semitoneDiff) > 0 && Math.abs(c.semitoneDiff) <= 2).length;
+                              const avgShift = connections.reduce((acc, c) => acc + Math.abs(c.semitoneDiff), 0) / Math.max(1, connections.length);
+
+                              return (
+                                <div className="lg:col-span-5 bg-gray-900/90 border border-gray-800/80 rounded-xl p-3 flex flex-col justify-between h-full min-h-[320px] shadow-inner font-mono" id="voice-leading-interactive-panel">
+                                  {/* Panel header */}
+                                  <div>
+                                    <div className="flex items-center justify-between text-[10px] font-mono font-bold uppercase tracking-wider text-amber-400">
+                                      <span className="flex items-center gap-1">
+                                        <Sparkles size={11} className="text-amber-400 animate-pulse" />
+                                        Stimmführungspfad
+                                      </span>
+                                      <span className="text-[9px] bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded-full font-mono">
+                                        {hoveredSuggestion ? "Hover Vorschau5" : "Ausgewählt"}
+                                      </span>
+                                    </div>
+                                    <p className="text-[9px] text-gray-400 mt-1 leading-snug">
+                                      Verbindung von <span className="text-indigo-400 font-bold">{prevChordName}</span> zu <span className="text-amber-400 font-bold">{targetChordName}</span>. Die hellsten Linien zeigen optimale, fließende Stimmführung.
+                                    </p>
+                                  </div>
+
+                                  {/* Dynamic SVG Board */}
+                                  <div className="relative flex-1 flex items-center justify-between my-2 border border-gray-800/50 rounded-lg p-2.5 bg-gray-950/90 h-[190px]" id="voice-leading-canvas">
+                                    
+                                    {/* Left Column (Previous) */}
+                                    <div className="flex flex-col justify-between h-full z-10 w-22">
+                                      <div className="text-[10px] font-mono font-extrabold text-indigo-400 text-center mb-1 bg-indigo-950/40 border border-indigo-900/40 py-0.5 rounded uppercase">
+                                        {prevChordName}
+                                      </div>
+                                      <div className="flex-1 flex flex-col justify-around py-1 gap-1.5 w-full">
+                                        {prevChordNotes.map((n, idx) => {
+                                          const interval = getChordInterval(prevChordName, n.note);
+                                          return (
+                                            <div key={`vl-prev-chord-${idx}`} className="flex items-center gap-1.5 justify-start w-full">
+                                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                                interval.label === "R" ? "bg-emerald-500" :
+                                                interval.label.includes("3") ? "bg-blue-400" :
+                                                interval.label === "5" ? "bg-amber-400" :
+                                                interval.label.includes("7") ? "bg-purple-400" :
+                                                "bg-indigo-455"
+                                              } animate-pulse`} />
+                                              <span className={`text-[9.5px] font-mono font-extrabold px-1.5 py-0.5 rounded border transition-all flex items-center justify-between flex-1 ${interval.colorClass}`}>
+                                                <span>
+                                                  {n.note}<span className="text-[7px] opacity-65 font-semibold ml-0.5">{n.octave ?? 3}</span>
+                                                </span>
+                                                <span className="text-[7.5px] font-black opacity-80 uppercase leading-none font-mono">{interval.label}</span>
+                                              </span>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+
+                                    {/* SVG Overlay */}
+                                    <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 300 200" preserveAspectRatio="none" style={{ zIndex: 5 }}>
+                                      <g>
+                                        {connections.map((conn, cIdx) => {
+                                          const M = prevChordNotes.length;
+                                          const N = targetChordNotes.length;
+
+                                          const sX = 75;
+                                          const eX = 225;
+                                          const sY = M > 1 ? 40 + (conn.prevIdx * (125 / (M - 1))) : 100;
+                                          const eY = N > 1 ? 40 + (conn.nextIdx * (125 / (N - 1))) : 100;
+
+                                          const cpX1 = sX + 45;
+                                          const cpY1 = sY;
+                                          const cpX2 = eX - 45;
+                                          const cpY2 = eY;
+
+                                          const absDiff = Math.abs(conn.semitoneDiff);
+                                          let strokeColor = "#4B5563"; // default dim
+                                          let glowColor = "rgba(75, 85, 99, 0.2)";
+                                          let labelStyle = "text-gray-500 bg-gray-950 border border-gray-900";
+                                          let strokeWidth = "1.5";
+                                          let isDashed = true;
+
+                                          if (absDiff === 0) {
+                                            strokeColor = "#10B981"; // super clean, emerald green for common tone holding index
+                                            glowColor = "rgba(16, 185, 129, 0.4)";
+                                            strokeWidth = "2.5";
+                                            isDashed = false;
+                                            labelStyle = "text-emerald-400 bg-emerald-950 border border-emerald-900/80 font-bold";
+                                          } else if (absDiff <= 2) {
+                                            strokeColor = "#34D399"; // beautiful soft mint emerald for smooth voice leading transitions (1-2 semitones)
+                                            glowColor = "rgba(52, 211, 153, 0.3)";
+                                            strokeWidth = "2";
+                                            isDashed = false;
+                                            labelStyle = "text-teal-300 bg-teal-950 border border-teal-900/60 font-bold";
+                                          } else if (absDiff <= 4) {
+                                            strokeColor = "#F59E0B"; // fine amber transition
+                                            strokeWidth = "1.5";
+                                            isDashed = true;
+                                            labelStyle = "text-amber-400 bg-gray-900 border border-amber-900/20";
+                                          } else {
+                                            strokeColor = "#6366F1"; // standard jump
+                                            strokeWidth = "1";
+                                            isDashed = true;
+                                            labelStyle = "text-indigo-400 bg-indigo-950 border border-indigo-900/20";
+                                          }
+
+                                          const midX = (sX + eX) / 2;
+                                          const midY = (sY + eY) / 2;
+
+                                          return (
+                                            <g key={`v-path-${cIdx}`} className="transition-all duration-300">
+                                              {/* Glow Layer */}
+                                              {!isDashed && (
+                                                <path
+                                                  d={`M ${sX} ${sY} C ${cpX1} ${cpY1}, ${cpX2} ${cpY2}, ${eX} ${eY}`}
+                                                  fill="none"
+                                                  stroke={strokeColor}
+                                                  strokeWidth="5"
+                                                  strokeOpacity="0.25"
+                                                />
+                                              )}
+                                              {/* Core dynamic line */}
+                                              <path
+                                                d={`M ${sX} ${sY} C ${cpX1} ${cpY1}, ${cpX2} ${cpY2}, ${eX} ${eY}`}
+                                                fill="none"
+                                                stroke={strokeColor}
+                                                strokeWidth={strokeWidth}
+                                                strokeOpacity="1"
+                                                strokeDasharray={isDashed ? "3,3" : "none"}
+                                              />
+
+                                              {/* Connecting text indicator card */}
+                                              <foreignObject
+                                                x={midX - 18}
+                                                y={midY - 8}
+                                                width="36"
+                                                height="16"
+                                                className="overflow-visible"
+                                              >
+                                                <div className={`flex items-center justify-center text-[7.5px] font-mono leading-none rounded px-1 py-0.5 text-center shadow select-none ${labelStyle}`}>
+                                                  {conn.semitoneDiff === 0 ? "Hold" : `${conn.semitoneDiff > 0 ? "+" : ""}${conn.semitoneDiff}`}
+                                                </div>
+                                              </foreignObject>
+                                            </g>
+                                          );
+                                        })}
+                                      </g>
+                                    </svg>
+
+                                    {/* Right Column (Next Target) */}
+                                    <div className="flex flex-col justify-between h-full z-10 w-22 items-end">
+                                      <div className="text-[10px] font-mono font-extrabold text-amber-400 text-center mb-1 bg-amber-950/40 border border-amber-900/40 py-0.5 px-2 rounded uppercase">
+                                        {targetChordName}
+                                      </div>
+                                      <div className="flex-1 flex flex-col justify-around py-1 gap-1.5 w-full items-end font-bold">
+                                        {targetChordNotes.map((n, idx) => {
+                                          const interval = getChordInterval(targetChordName, n.note);
+                                          return (
+                                            <div key={`vl-target-chord-${idx}`} className="flex items-center gap-1.5 justify-end w-full">
+                                              <span className={`text-[9.5px] font-mono font-extrabold px-1.5 py-0.5 rounded border transition-all flex items-center justify-between flex-1 ${interval.colorClass}`}>
+                                                <span className="text-[7.5px] font-black opacity-80 uppercase leading-none font-mono">{interval.label}</span>
+                                                <span>
+                                                  {n.note}<span className="text-[7px] opacity-65 font-semibold ml-0.5">{n.octave ?? 3}</span>
+                                                </span>
+                                              </span>
+                                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                                interval.label === "R" ? "bg-emerald-500" :
+                                                interval.label.includes("3") ? "bg-blue-400" :
+                                                interval.label === "5" ? "bg-amber-400" :
+                                                interval.label.includes("7") ? "bg-purple-400" :
+                                                "bg-amber-405/80"
+                                              }`} />
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+
+                                  </div>
+
+                                  {/* Dynamic mini efficiency statistics */}
+                                  <div className="bg-gray-950 border border-gray-800/50 rounded-lg p-2 flex items-center justify-between text-[8px] font-mono text-gray-400 mt-1" id="voice-leading-analysis-legend">
+                                    <div className="flex items-center gap-1">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                      <span>Halte-Töne: <strong className="text-emerald-400">{commonTonesCount}</strong></span>
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-teal-400" />
+                                      <span>Flow-Schritte: <strong className="text-teal-400">{efficientShiftsCount}</strong></span>
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                                      <span>Ø Distanz: <strong className="text-amber-400">{avgShift.toFixed(1)}</strong></span>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                          </div>
+
+                          {/* Remaining collapsible or lower score chords */}
+                          {filteredSuggestions.length > 4 && (
+                            <div className="border-t border-gray-900 pt-3 mt-1.5">
+                              <span className="text-[9px] font-mono text-gray-500 uppercase block mb-1.5">
+                                Andere d’accord-Möglichkeiten:
+                              </span>
+                              <motion.div 
+                                variants={containerVariants}
+                                  initial="hidden"
+                                animate="show"
+                                className="grid grid-cols-5 gap-1.5"
                               >
-                                {possibleChord}
-                              </motion.button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                  </div>
-                )}
+                                {filteredSuggestions.slice(4).map((item) => {
+                                  const possibleChord = item.chord;
+                                  const isSelected = activeChords[editingSlotIndex] === possibleChord;
+                                  return (
+                                    <motion.button
+                                      variants={itemVariants}
+                                      key={`other-${possibleChord}`}
+                                      type="button"
+                                      title={item.reason}
+                                      onMouseEnter={() => {
+                                        setHoveredSuggestion(possibleChord);
+                                        if (autoPreviewEnabled) {
+                                          const notes = getChordVoicing(possibleChord, soundChar);
+                                          playChord(notes, 1.0);
+                                        }
+                                      }}
+                                      onMouseLeave={() => setHoveredSuggestion(null)}
+                                      onClick={() => {
+                                        const updated = [...activeChords];
+                                        updated[editingSlotIndex] = possibleChord;
+                                        handleUpdateChords(updated);
+                                        setEditingSlotIndex(null);
+                                        
+                                        const notes = getChordVoicing(possibleChord, soundChar);
+                                        playChord(notes, 1.0);
+                                      }}
+                                      whileHover={{
+                                        scale: [1, 1.04, 1.01, 1.06, 1],
+                                        boxShadow: isSelected
+                                          ? [
+                                              "0 0 0px rgba(245, 158, 11, 0.4)",
+                                              "0 0 10px rgba(245, 158, 11, 0.7)",
+                                              "0 0 4px rgba(245, 158, 11, 0.4)",
+                                              "0 0 12px rgba(245, 158, 11, 0.8)",
+                                              "0 0 0px rgba(245, 158, 11, 0.4)"
+                                            ]
+                                          : [
+                                              "0 0 0px rgba(156, 163, 175, 0)",
+                                              "0 0 8px rgba(156, 163, 175, 0.4)",
+                                              "0 0 3px rgba(156, 163, 175, 0.15)",
+                                              "0 0 10px rgba(156, 163, 175, 0.5)",
+                                              "0 0 0px rgba(156, 163, 175, 0)"
+                                            ],
+                                        transition: {
+                                          duration: 60 / bpm,
+                                          repeat: Infinity,
+                                          ease: "easeInOut"
+                                        }
+                                      }}
+                                      className={`py-1 rounded text-[10px] font-bold font-mono transition-colors text-center border cursor-pointer
+                                        ${isSelected
+                                          ? "bg-amber-600 border-amber-500 text-white"
+                                          : "bg-gray-900 border-gray-850 text-gray-500 hover:text-white hover:border-gray-750"
+                                        }`}
+                                    >
+                                      {possibleChord}
+                                    </motion.button>
+                                  );
+                                })}
+                              </motion.div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Edit Controls toolbar */}
                 <div className="flex gap-1.5 mb-4 select-none">
@@ -1973,6 +2132,129 @@ ${activeRecipe.theoryReveal.simpleExplanation}
               <div className="mt-3">
                 <WaveformVisualizer isPlaying={isMetronomePlaying} />
               </div>
+            </div>
+
+            {/* MIDI Controller Config Sub-Card */}
+            <div className="bg-gray-950/60 border border-gray-900 rounded-xl p-3.5 mb-4" id="midi-control-box">
+              <div className="flex items-center justify-between mb-2 pb-2 border-b border-gray-900">
+                <div className="flex items-center gap-1.5">
+                  <span className="relative flex h-2 w-2">
+                    {midiBlink && (
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    )}
+                    <span className={`relative inline-flex rounded-full h-2 w-2 ${midiInfo.isMidiActive ? (midiBlink ? "bg-emerald-400" : "bg-emerald-500") : "bg-gray-600"}`}></span>
+                  </span>
+                  <span className="text-[10px] font-bold font-mono text-gray-400 tracking-wider uppercase">
+                    MIDI Studio Controller
+                  </span>
+                </div>
+                
+                {midiInfo.isMidiActive && (
+                  <span className="text-[8px] font-mono font-bold text-emerald-400 bg-emerald-950/40 border border-emerald-900/40 px-1.5 py-0.5 rounded">
+                    AKTIV
+                  </span>
+                )}
+              </div>
+
+              {!midiInfo.isMidiActive ? (
+                <div className="flex flex-col gap-2 py-1">
+                  <p className="text-[9px] text-gray-500 font-mono leading-relaxed">
+                    Schließe dein MIDI-Keyboard (USB/Interface) an, um Töne und Akkorde live einzuspielen.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleInitializeMidi}
+                    className="py-1.5 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-indigo-300 hover:text-white rounded-lg text-[10px] font-mono font-bold uppercase transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <span>MIDI-Geräte suchen</span>
+                  </button>
+                  {midiActiveStatus === "error" && (
+                    <span className="text-[8px] font-mono text-red-500 text-center">
+                      Web MIDI wird blockiert oder nicht unterstützt.
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2.5">
+                  {/* MIDI Input Select */}
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[8px] font-mono text-gray-500 uppercase tracking-widest">
+                      MIDI-Eingang (Keyboard)
+                    </label>
+                    <select
+                      value={midiInfo.selectedInputId}
+                      onChange={(e) => {
+                        setSelectedInputId(e.target.value);
+                        handleMidiStateChange();
+                      }}
+                      className="bg-gray-950/80 border border-gray-900 rounded-lg p-1.5 text-[10px] font-mono text-gray-300 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="all">Alle Eingänge (Sammelkanal)</option>
+                      {midiInfo.inputs.map((inp) => (
+                        <option key={inp.id} value={inp.id}>
+                          {inp.name}
+                        </option>
+                      ))}
+                      {midiInfo.inputs.length === 0 && (
+                        <option disabled>Keine Keyboards erkannt</option>
+                      )}
+                    </select>
+                  </div>
+
+                  {/* MIDI Output Select */}
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[8px] font-mono text-gray-500 uppercase tracking-widest">
+                      MIDI-Ausgang (Synth)
+                    </label>
+                    <select
+                      value={midiInfo.selectedOutputId}
+                      onChange={(e) => {
+                        setSelectedOutputId(e.target.value);
+                        handleMidiStateChange();
+                      }}
+                      className="bg-gray-950/80 border border-gray-900 rounded-lg p-1.5 text-[10px] font-mono text-gray-300 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="none">Stumm / Nur In-App Ton</option>
+                      {midiInfo.outputs.map((out) => (
+                        <option key={out.id} value={out.id}>
+                          {out.name}
+                        </option>
+                      ))}
+                      {midiInfo.outputs.length === 0 && (
+                        <option disabled>Keine Hardware-Synths erkannt</option>
+                      )}
+                    </select>
+                  </div>
+
+                  {/* MIDI Thru Toggle */}
+                  <div className="flex items-center justify-between pt-1 pb-0.5">
+                    <div className="flex flex-col">
+                      <span className="text-[9px] font-mono text-gray-400 font-bold">MIDI Thru</span>
+                      <span className="text-[7px] text-gray-500 font-mono">Keyboard direkt an Synth weiterleiten</span>
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input 
+                        type="checkbox" 
+                        checked={midiInfo.midiThruEnabled} 
+                        onChange={(e) => {
+                          setMidiThruEnabled(e.target.checked);
+                          handleMidiStateChange();
+                        }}
+                        className="sr-only peer"
+                      />
+                      <div className="relative w-7 h-4 bg-gray-800 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:start-[2px] after:bg-gray-300 after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-600"></div>
+                    </label>
+                  </div>
+
+                  {/* Active Monitor Bar */}
+                  <div className="flex items-center justify-between text-[8px] font-mono text-gray-500 pt-1.5 border-t border-gray-900">
+                    <span>Erkannte Geräte: {midiInfo.inputs.length + midiInfo.outputs.length}</span>
+                    <span className={midiBlink ? "text-emerald-400 font-extrabold transition-all" : "text-gray-650 transition-all"}>
+                      ● Signal-Aktivität
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Save chord idea action */}

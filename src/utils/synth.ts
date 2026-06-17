@@ -1,6 +1,8 @@
 // High-Fidelity Physical Modeling Web Audio Synthesizer for VibeTheory
 // Simulates accurate, highly realistic steel strings, physical hammer-strikes, and woody bass thumps natively.
 
+import { sendMidiNoteOn } from "./midi";
+
 export type SoundCharacteristic = "acoustic_piano" | "vintage_rhodes" | "steel_guitar";
 
 let activeSoundCharacteristic: SoundCharacteristic = "acoustic_piano";
@@ -119,11 +121,14 @@ function createNoiseBuffer(ctx: AudioContext, durationSec: number = 0.035): Audi
 }
 
 export function playSynthNote(noteName: string, octave: number = 3, duration: number = 0.8, velocity: number = 1.0) {
-  playSynthNoteInternal(noteName, octave, duration, velocity);
+  playSynthNoteInternal(noteName, octave, duration, velocity, true);
 }
 
-export function playSynthNoteInternal(noteName: string, octave: number = 3, duration: number = 0.8, velocity: number = 1.0) {
+export function playSynthNoteInternal(noteName: string, octave: number = 3, duration: number = 0.8, velocity: number = 1.0, emitMidi: boolean = true) {
   try {
+    if (emitMidi) {
+      sendMidiNoteOn(noteName, octave, velocity, duration);
+    }
     const ctx = getAudioContext();
     setupGlobalReverb(ctx);
 
